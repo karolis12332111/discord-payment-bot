@@ -11,18 +11,14 @@ app.listen(PORT, () => {
   console.log(`Uptime server running on port ${PORT}`);
 });
 
-
 const {
   Client,
   GatewayIntentBits,
   Events,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  ActionRowBuilder,
   EmbedBuilder,
 } = require('discord.js');
 
@@ -34,11 +30,15 @@ console.log('Token loaded?', !!process.env.DISCORD_TOKEN);
 console.log('Token length:', process.env.DISCORD_TOKEN?.length ?? 'MISSING');
 
 if (!process.env.DISCORD_TOKEN) {
-  console.error('❌ DISCORD_TOKEN missing in .env');
+  console.error('❌ DISCORD_TOKEN missing in env');
   process.exit(1);
 }
 if (!process.env.STAFF_CHANNEL_ID) {
-  console.error('❌ STAFF_CHANNEL_ID missing in .env');
+  console.error('❌ STAFF_CHANNEL_ID missing in env');
+  process.exit(1);
+}
+if (!process.env.PAYPAL_RECEIVER) {
+  console.error('❌ PAYPAL_RECEIVER missing in env (email or paypal.me username)');
   process.exit(1);
 }
 
@@ -46,20 +46,10 @@ if (!process.env.STAFF_CHANNEL_ID) {
 const pendingOrders = new Map();
 const newOrderId = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 
-const methodToLink = (method) => {
-  if (method === 'paypal') return process.env.PAYPAL_LINK;
-  if (method === 'stripe') return process.env.STRIPE_LINK;
-  if (method === 'crypto') return process.env.CRYPTO_LINK;
-  return null;
-};
-
 // ====== Client ======
-// SVARBU: išėmėm MessageContent intent -> nebereikia įjungti privileged intents portale
+// No privileged intents needed
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
 // Gateway diagnostics
@@ -80,36 +70,15 @@ client.once(Events.ClientReady, () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ====== /payment flow ======
+// ====== /payment flow (PayPal only) ======
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // /payment -> show modal immediately
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName !== 'payment') return;
 
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId('payment_method_select')
-        .setPlaceholder('Select a payment method...')
-        .addOptions(
-          { label: 'PayPal', value: 'paypal', description: 'Pay via PayPal link' },
-          { label: 'Stripe', value: 'stripe', description: 'Pay via Stripe checkout' },
-          { label: 'Crypto', value: 'crypto', description: 'Pay via crypto instructions' }
-        );
-
-      await interaction.reply({
-        content: 'How would you like to pay?',
-        components: [new ActionRowBuilder().addComponents(menu)],
-        ephemeral: true,
-      });
-      return;
-    }
-
-    if (interaction.isStringSelectMenu()) {
-      if (interaction.customId !== 'payment_method_select') return;
-
-      const method = interaction.values[0];
-
       const modal = new ModalBuilder()
-        .setCustomId(`payment_notes_modal:${method}`)
+        .setCustomId('paypal_payment_modal')
         .setTitle('Order details');
 
       const productInput = new TextInputBuilder()
@@ -135,50 +104,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    // Modal submit
     if (interaction.isModalSubmit()) {
-      if (!interaction.customId.startsWith('payment_notes_modal:')) return;
+      if (interaction.customId !== 'paypal_payment_modal') return;
 
-      const method = interaction.customId.split(':')[1];
       const product = interaction.fields.getTextInputValue('product_name');
       const price = interaction.fields.getTextInputValue('product_price');
       const orderId = newOrderId();
 
-      const link = methodToLink(method);
-      if (!link) {
-        await interaction.reply({ content: '❌ Payment link not set for this method.', ephemeral: true });
-        return;
-      }
-
       pendingOrders.set(interaction.user.id, {
-        method,
+        method: 'paypal',
         product,
         price,
         orderId,
         createdAt: Date.now(),
       });
 
+      const receiver = process.env.PAYPAL_RECEIVER;
+
       const embed = new EmbedBuilder()
-        .setTitle('Payment Request')
-        .setDescription('Please complete your payment using the button below.')
+        .setTitle('PayPal Payment Instructions')
+        .setDescription(
+          [
+            'Please complete the payment in PayPal using the instructions below.',
+            '',
+            `**Send to this PayPal:** **${receiver}**`,
+            '',
+            '**Important:** In the PayPal note/message, paste this exactly:',
+            `\`${orderId} | ${product} | ${price}\``,
+            '',
+            'After payment, **please send a screenshot** in this server.'
+          ].join('\n')
+        )
         .addFields(
           { name: 'Order ID', value: orderId, inline: true },
-          { name: 'Payment method', value: method.toUpperCase(), inline: true },
           { name: 'Product', value: product, inline: false },
           { name: 'Price', value: price, inline: false }
         )
-        .setFooter({ text: 'After payment, please send a screenshot in this server.' });
-
-      const payButton = new ButtonBuilder()
-        .setLabel('Pay now')
-        .setStyle(ButtonStyle.Link)
-        .setURL(link);
+        .setFooter({ text: 'We verify payments manually.' });
 
       await interaction.reply({
-        content: '✅ Order created! Complete payment, then send a screenshot.',
+        content: '✅ Order created! Follow the PayPal instructions below.',
         embeds: [embed],
-        components: [new ActionRowBuilder().addComponents(payButton)],
         ephemeral: true,
       });
+
       return;
     }
   } catch (err) {
@@ -192,8 +162,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 // ====== Screenshot handler ======
-// Be MessageContent intent, bot'as vis tiek mato attachments, bet NEMATO žinutės teksto.
-// Mums pakanka, nes tikrinam attachments.
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild) return;
@@ -215,11 +183,10 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('New Payment Screenshot')
+      .setTitle('New PayPal Payment Screenshot')
       .addFields(
         { name: 'User', value: `${message.author.tag} (${message.author.id})`, inline: false },
         { name: 'Order ID', value: order.orderId, inline: true },
-        { name: 'Method', value: order.method.toUpperCase(), inline: true },
         { name: 'Product', value: order.product, inline: false },
         { name: 'Price', value: order.price, inline: false },
         { name: 'Screenshot URL', value: img.url, inline: false }
