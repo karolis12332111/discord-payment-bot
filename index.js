@@ -2,14 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 
-app.get('/', (req, res) => {
-  res.send('Bot is alive 🚀');
-});
+app.get('/', (req, res) => res.send('Bot is alive 🚀'));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Uptime server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Uptime server running on port ${PORT}`));
 
 const {
   Client,
@@ -19,6 +15,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
+  StringSelectMenuBuilder,
   EmbedBuilder,
 } = require('discord.js');
 
@@ -47,36 +44,46 @@ const pendingOrders = new Map();
 const newOrderId = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 
 // ====== Client ======
-// No privileged intents needed
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
-// Gateway diagnostics
 client.on('error', (e) => console.error('CLIENT ERROR:', e));
 client.on('shardError', (e) => console.error('SHARD ERROR:', e));
-client.on('shardDisconnect', (event, shardId) => {
-  console.error('SHARD DISCONNECT:', {
-    shardId,
-    code: event?.code,
-    reason: event?.reason,
-    wasClean: event?.wasClean,
-  });
-  console.error('Hints: 4004=Invalid token | 4014=Privileged intents | 1006/ECONNRESET=Network/Firewall/Antivirus');
-});
-client.on('shardReconnecting', (id) => console.log('SHARD RECONNECTING:', id));
 
 client.once(Events.ClientReady, () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ====== /payment flow (PayPal only) ======
+// ====== /payment flow (PayPal only, with a single choice) ======
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // /payment -> show modal immediately
+    // /payment -> show one-option select menu
     if (interaction.isChatInputCommand()) {
       if (interaction.commandName !== 'payment') return;
 
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('payment_method_select')
+        .setPlaceholder('Choose a payment method...')
+        .addOptions({
+          label: 'PayPal',
+          value: 'paypal',
+          description: 'Pay via PayPal (send screenshot to confirm)',
+        });
+
+      await interaction.reply({
+        content: 'Select a payment method.\n✅ After payment, **send a screenshot to confirm**.',
+        components: [new ActionRowBuilder().addComponents(menu)],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // select menu -> open modal
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId !== 'payment_method_select') return;
+
+      // only paypal exists anyway
       const modal = new ModalBuilder()
         .setCustomId('paypal_payment_modal')
         .setTitle('Order details');
@@ -104,7 +111,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Modal submit
+    // modal submit -> show PayPal instructions (no links)
     if (interaction.isModalSubmit()) {
       if (interaction.customId !== 'paypal_payment_modal') return;
 
@@ -126,29 +133,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setTitle('PayPal Payment Instructions')
         .setDescription(
           [
-            'Please complete the payment in PayPal using the instructions below.',
+            '**1) Open PayPal → Send**',
+            `**2) Send to:** **${receiver}**`,
             '',
-            `**Send to this PayPal:** **${receiver}**`,
-            '',
-            '**Important:** In the PayPal note/message, paste this exactly:',
+            '**3) In PayPal note/message, paste this exactly:**',
             `\`${orderId} | ${product} | ${price}\``,
             '',
-            'After payment, **please send a screenshot** in this server.'
+            '✅ **After payment, send a screenshot to confirm.**',
           ].join('\n')
         )
         .addFields(
           { name: 'Order ID', value: orderId, inline: true },
           { name: 'Product', value: product, inline: false },
           { name: 'Price', value: price, inline: false }
-        )
-        .setFooter({ text: 'We verify payments manually.' });
+        );
 
       await interaction.reply({
         content: '✅ Order created! Follow the PayPal instructions below.',
         embeds: [embed],
         ephemeral: true,
       });
-
       return;
     }
   } catch (err) {
